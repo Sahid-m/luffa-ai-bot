@@ -19,7 +19,9 @@ This is a demo project that integrates a LangGraph-powered AI assistant with the
   - `book_hotel`: (placeholder) Simulate a hotel booking
 
 ---
-
+## Demo Video:
+Watch RPS AI Bot in action:
+[demo-video.mp4](https://www.youtube.com/watch?v=SRU7MjWs0DA)
 ## 🛠 Tech Stack
 
 - Python
