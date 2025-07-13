@@ -1,17 +1,19 @@
 from langgraph.prebuilt import create_react_agent
-# from langchain.agents import load_tools, create_react_agent
-
 from app.tools.transcript import transcribe
 from app.tools.video_downloader import download_video
 from app.tools.book_hotel import book_hotel
 from app.tools.start_vote import initiate_vote, count_vote_result
 from app.tools.image_generator import generate_image
-
 from app.config import config
 from app.utils import send_user_message
-from google import genai
-from google.genai import types
+import google.generativeai as genai
 import json
+import random
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 openai_api_key = config.OPENAI_API_KEY
 
@@ -40,94 +42,131 @@ You are an AI Agent. YOU HAVE TO GIVE REPLY IN A SPECIFIC FORMAT and the format 
 - Also SEND ONLY JSON RESPONSE NOTHING ELSE
 """
 
+# Configure Google Generative AI
+genai.configure(api_key=config.OPENAI_API_KEY)
+client = genai.GenerativeModel(model_name="gemini-1.5-flash")
 
+# In-memory game state storage for each session
+game_state = {}
 
-client = genai.Client()
+def initialize_game_state(session_id):
+    """Initialize game state for a session if it doesn't exist."""
+    if session_id not in game_state:
+        game_state[session_id] = {
+            "in_game": False,
+            "user_score": 0,
+            "ai_score": 0,
+            "last_message": "Do you want to play Rock, Paper, Scissors?"
+        }
+    return game_state[session_id]
 
-# Receives a user prompt and forwards it to the AI agent for processing.
-# Handles collecting tool call arguments and constructing responses based on tool usage.
+def play_round(user_choice, session_id):
+    """Play a single round of Rock, Paper, Scissors."""
+    valid_choices = ["rock", "paper", "scissors"]
+    user_choice = user_choice.lower().strip()
+
+    # Validate user input
+    if user_choice not in valid_choices:
+        return {
+            "message": "Invalid input. Please type rock, paper, or scissors.",
+            "function_call_used": False,
+            "function_call": None
+        }
+
+    # AI makes a random choice
+    ai_choice = random.choice(valid_choices)
+
+    # Determine the winner
+    if user_choice == ai_choice:
+        result = f"It's a tie! Both chose {user_choice}."
+    elif (user_choice == "rock" and ai_choice == "scissors") or \
+         (user_choice == "paper" and ai_choice == "rock") or \
+         (user_choice == "scissors" and ai_choice == "paper"):
+        game_state[session_id]["user_score"] += 1
+        result = f"You win this round! {user_choice} beats {ai_choice}."
+    else:
+        game_state[session_id]["ai_score"] += 1
+        result = f"I win this round! {ai_choice} beats {user_choice}."
+
+    # Update score message
+    score_message = f"Score: You {game_state[session_id]['user_score']} - AI {game_state[session_id]['ai_score']}"
+
+    # Check for game end
+    if game_state[session_id]["user_score"] >= 5:
+        game_state[session_id]["in_game"] = False
+        game_state[session_id]["last_message"] = "Do you want to play Rock, Paper, Scissors?"
+        result = f"Congratulations, you won the game! Final score: You {game_state[session_id]['user_score']} - AI {game_state[session_id]['ai_score']}. {game_state[session_id]['last_message']}"
+        game_state[session_id]["user_score"] = 0
+        game_state[session_id]["ai_score"] = 0
+    elif game_state[session_id]["ai_score"] >= 5:
+        game_state[session_id]["in_game"] = False
+        game_state[session_id]["last_message"] = "Do you want to play Rock, Paper, Scissors?"
+        result = f"Haha, I crushed you! Final score: You {game_state[session_id]['user_score']} - AI {game_state[session_id]['ai_score']}. {game_state[session_id]['last_message']}"
+        game_state[session_id]["user_score"] = 0
+        game_state[session_id]["ai_score"] = 0
+    else:
+        result = f"{result} {score_message}"
+
+    return {
+        "message": result,
+        "function_call_used": False,
+        "function_call": None
+    }
+
 def invoke(prompt, from_uid):
-    print(f"Received prompt: {prompt} from {from_uid}")
+    logger.info(f"Received prompt: {prompt} from {from_uid}")
 
-    response = client.models.generate_content(
-    model="gemini-2.5-flash",
-    config=types.GenerateContentConfig(
-        system_instruction=system_instruction), contents={prompt})
+    # Initialize or retrieve game state
+    state = initialize_game_state(from_uid)
 
-    print(response.text)
-    parsed_output = decrypt_response(response.text)
-    
-    print(parsed_output["function_call_used"])
-    
-    #Write logic to get the text from user and see if its asking for one of three questions if not use llm and give normal answerr
-    #Question 1 Give details about specific transaction, Account or anything on Endless chain make a function to get that 
-    #Question 2 Make a transaction on behalf of the user if yes then the user would need to make a function or a tool to do that
+    # Handle game logic
+    if not state["in_game"]:
+        if prompt.lower().strip() == "yes":
+            state["in_game"] = True
+            state["last_message"] = "Great! Type rock, paper, or scissors to make your move."
+            response = {
+                "message": state["last_message"],
+                "function_call_used": False,
+                "function_call": None
+            }
+        else:
+            # Fall back to Google Generative AI for non-game responses
+            try:
+                logger.info("Calling Google Generative AI")
+                response = client.generate_content(
+                    contents=[{
+                        "role": "user",
+                        "parts": [{"text": prompt}]
+                    }],
+                    generation_config={"system_instruction": system_instruction}
+                )
+                logger.debug(f"Google API response: {response.text}")
+                response = decrypt_response(response.text)
+            except Exception as e:
+                logger.error(f"Error calling Google Generative AI: {e}")
+                response = {
+                    "message": "Sorry, something went wrong. Do you want to play Rock, Paper, Scissors?",
+                    "function_call_used": False,
+                    "function_call": None
+                }
+    else:
+        response = play_round(prompt, from_uid)
 
-    # Format the user message and append it to the interaction history
-    # message = {
-    #     "role": "user",
-    #     "content": f"{prompt}",
-    # }
-    # history.append(message)
+    # Update last message in game state
+    state["last_message"] = response["message"]
+    logger.info(f"Agent response: {response}")
 
-    # query = {
-    #     "messages": history
-    # }
+    # Send response to user
+    try:
+        send_user_message(from_uid, response["message"])
+        logger.info(f"Sent response to user {from_uid}: {response['message']}")
+    except Exception as e:
+        logger.error(f"Failed to send user message: Luffa API error: {e}")
 
-    # # Invoke the AI agent with the accumulated history
-    # result = agent.invoke(query)
-    # # result = ""
-
-    # # Initialize variables for tracking tool usage and arguments
-    # tool_name = None
-    # collected_args = {}
-    # required_params = []
-
-    # # Inspect agent's returned steps for tool calls and extract arguments
-    # for step in result.get("messages", []):
-    #     if hasattr(step, "tool_calls"):
-    #         for call in step.tool_calls:
-    #             tool_name = call.get("name")
-    #             collected_args.update(call.get("args", {}))
-    #             # You can define required_params based on the tool manually if needed
-    #             if tool_name == "book_hotel":
-    #                 required_params = ["location", "check_in", "check_out", "guests", "room_type"]
-    #             if tool_name == "initiate_vote":
-    #                 required_params = ["group_id", "title", "options"]
-
-    #     elif hasattr(step, "name") and step.name == "book_hotel":
-    #         try:
-    #             parsed = eval(step.content)
-    #             if isinstance(parsed, dict):
-    #                 collected_args.update(parsed)
-    #         except Exception:
-    #             pass
-
-    # # Construct structured response
-    # # Skip structured response if tool is in excluded list (e.g., image generation, counting)
-    # excluded_tools = {"count_vote_result", "generate_image"}
-    # if tool_name and tool_name not in excluded_tools:
-    #     missing_params = [p for p in required_params if
-    #                       p not in collected_args or not collected_args[p] or collected_args[p] == "undefined"]
-    #     if missing_params:
-    #         result["response"] = f"Got partial info for `{tool_name}`. Please provide: {', '.join(missing_params)}"
-    #     else:
-    #         result["response"] = f"All parameters collected for `{tool_name}`: {collected_args}"
-    # else:
-    #     result["response"] = result.get("messages", [])[-1].content if result.get("messages") else ""
-
-    # history.append({"role": "assistant", "content": result["response"]})
-
-    # Send the final response back to the user via bot message
-    send_user_message(from_uid,parsed_output["message"] )
-
-    return "asdf";
-
-
+    return response
 
 def decrypt_response(response_text):
     try:
-        
         lines = response_text.strip().splitlines()
         if lines and lines[0].strip().startswith("```"):
             lines = lines[1:]
@@ -135,10 +174,10 @@ def decrypt_response(response_text):
             lines = lines[:-1]
 
         cleaned_text = "\n".join(lines)
-        
-        response_data = json.loads(cleaned_text)
+        logger.debug(f"Cleaned response text: {cleaned_text}")
 
-        print(response_data)
+        response_data = json.loads(cleaned_text)
+        logger.info(f"Parsed response data: {response_data}")
 
         message = response_data.get("message", "")
         function_call_used = response_data.get("function_call_used", False)
@@ -147,7 +186,6 @@ def decrypt_response(response_text):
         # Basic validation
         if not isinstance(message, str) or not isinstance(function_call_used, bool):
             raise ValueError("Invalid format in response.")
-        print(message)
         
         return {
             "message": message,
@@ -156,7 +194,7 @@ def decrypt_response(response_text):
         }
 
     except Exception as e:
-        print(f"Failed to parse response: {e}")
+        logger.error(f"Failed to parse response: {e}")
         return {
             "message": response_text,
             "function_call_used": False,
